@@ -1,8 +1,8 @@
 ## Interface: 120000
 ## Title: Enemy Nameplate Colors
 ## Notes: Colors enemy nameplates based on unit type and threat level
-## Author: Zerkggz
-## Version: 1.0.0
+## Author: YourName
+## Version: 1.0.1
 ## SavedVariables: EnemyNameplateColorsDB
 ## OptionalDeps: Blizzard_NamePlates
 

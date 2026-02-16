@@ -3,21 +3,21 @@ local ENC = {}
 _G[ADDON_NAME] = ENC
 
 ENC.inInstance = false
-ENC.interruptSpellID = nil
+ENC.interruptSpells = {}
 
 local interruptMap = {
     ["DEATHKNIGHT"] = {47528},
     ["WARRIOR"] = {6552},
-    ["WARLOCK"] = {19647, 89766, 119910, 1276467, 132409},
+    ["WARLOCK"] = {19647, 89766, 1276467, 119910, 119914, 132409},
     ["SHAMAN"] = {57994},
     ["ROGUE"] = {1766},
     ["PRIEST"] = {15487},
-    ["PALADIN"] = {31935, 96231},
+    ["PALADIN"] = {96231},
     ["MONK"] = {116705},
     ["MAGE"] = {2139},
     ["HUNTER"] = {187707, 147362},
     ["EVOKER"] = {351338},
-    ["DRUID"] = {38675, 78675, 106839},
+    ["DRUID"] = {78675, 106839},
     ["DEMONHUNTER"] = {183752},
 }
 
@@ -55,34 +55,39 @@ end
 
 function ENC:UpdateInterruptSpell()
     local class = UnitClassBase("player")
-    local interruptSpells = interruptMap[class] or {}
+    self.interruptSpells = {}
     
-    self.interruptSpellID = nil
-    for _, spellID in ipairs(interruptSpells) do
+    local spells = interruptMap[class] or {}
+    for _, spellID in ipairs(spells) do
         if C_SpellBook and C_SpellBook.IsSpellKnownOrInSpellBook then
             if C_SpellBook.IsSpellKnownOrInSpellBook(spellID) or 
                C_SpellBook.IsSpellKnownOrInSpellBook(spellID, Enum.SpellBookSpellBank.Pet) then
-                self.interruptSpellID = spellID
-                break
+                table.insert(self.interruptSpells, spellID)
             end
         elseif IsSpellKnown and IsSpellKnown(spellID) then
-            self.interruptSpellID = spellID
-            break
+            table.insert(self.interruptSpells, spellID)
         end
     end
 end
 
--- Returns secret boolean - do not test directly, use with C_CurveUtil
-function ENC:GetInterruptCooldownIsZero()
-    if not self.interruptSpellID then return nil end
+-- Returns a secret number: 1 if any interrupt is ready, 0 if all on cooldown
+function ENC:GetAnyInterruptReady()
+    if not self.interruptSpells or #self.interruptSpells == 0 then return nil end
+    if not C_Spell or not C_Spell.GetSpellCooldownDuration then return nil end
+    if not C_CurveUtil or not C_CurveUtil.EvaluateColorValueFromBoolean then return nil end
     
-    if C_Spell and C_Spell.GetSpellCooldownDuration then
-        local cooldownDuration = C_Spell.GetSpellCooldownDuration(self.interruptSpellID)
+    -- Accumulate: if any interrupt's IsZero is true, result becomes 1
+    local anyReady = 0
+    for _, spellID in ipairs(self.interruptSpells) do
+        local cooldownDuration = C_Spell.GetSpellCooldownDuration(spellID)
         if cooldownDuration and cooldownDuration.IsZero then
-            return cooldownDuration:IsZero()
+            local isZero = cooldownDuration:IsZero()
+            -- If isZero is true, set anyReady to 1; otherwise keep current anyReady
+            anyReady = C_CurveUtil.EvaluateColorValueFromBoolean(isZero, 1, anyReady)
         end
     end
-    return nil
+    
+    return anyReady
 end
 
 function ENC:InitDB()
@@ -277,7 +282,7 @@ function ENC:UpdateInterruptBorder(castBar, notInterruptible)
     
     local borderFrame = self:GetOrCreateInterruptBorder(castBar)
     
-    if not self.db.castBar.interruptReadyEnabled or not self.interruptSpellID then
+    if not self.db.castBar.interruptReadyEnabled or not self.interruptSpells or #self.interruptSpells == 0 then
         borderFrame:Hide()
         return
     end
@@ -287,8 +292,8 @@ function ENC:UpdateInterruptBorder(castBar, notInterruptible)
         return
     end
     
-    local isInterruptReady = self:GetInterruptCooldownIsZero()
-    if isInterruptReady == nil then
+    local anyReady = self:GetAnyInterruptReady()
+    if anyReady == nil then
         borderFrame:Hide()
         return
     end
@@ -296,12 +301,22 @@ function ENC:UpdateInterruptBorder(castBar, notInterruptible)
     self:UpdateInterruptBorderColor(borderFrame)
     borderFrame:Show()
     
-    -- Use C_CurveUtil to safely combine secret booleans into alpha
-    local alpha = 1
+    -- Start with interrupt ready status (anyReady is already 1 or 0 as secret number)
+    local alpha = anyReady
+    
+    -- Multiply by interruptibility: if notInterruptible is true, alpha becomes 0
     if notInterruptible ~= nil then
-        alpha = C_CurveUtil.EvaluateColorValueFromBoolean(notInterruptible, 0, 1)
+        local canInterrupt = C_CurveUtil.EvaluateColorValueFromBoolean(notInterruptible, 0, 1)
+        -- Multiply alpha by canInterrupt (both are secret numbers, but we can use EvaluateColorValueFromBoolean)
+        -- If canInterrupt is 0 (can't interrupt), we want alpha to be 0
+        -- If canInterrupt is 1 (can interrupt), we want alpha to stay as anyReady
+        -- We need to express: alpha = anyReady * canInterrupt
+        -- Use: if canInterrupt would be 0, result is 0; if canInterrupt would be 1, result is anyReady
+        -- Since canInterrupt comes from notInterruptible, we can combine differently:
+        -- alpha = EvaluateColorValueFromBoolean(notInterruptible, 0, anyReady)
+        alpha = C_CurveUtil.EvaluateColorValueFromBoolean(notInterruptible, 0, alpha)
     end
-    alpha = C_CurveUtil.EvaluateColorValueFromBoolean(isInterruptReady, alpha, 0)
+    
     borderFrame:SetAlpha(alpha)
 end
 
@@ -503,4 +518,4 @@ SlashCmdList["ENC"] = function()
     if ENC.OpenOptions then
         ENC:OpenOptions()
     end
-end	
+end
