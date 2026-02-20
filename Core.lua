@@ -5,6 +5,9 @@ _G[ADDON_NAME] = ENC
 ENC.inInstance = false
 ENC.interruptSpells = {}
 
+-- Custom cast bar fill texture
+local CUSTOM_CASTBAR_TEXTURE = "Interface\\AddOns\\EnemyNameplateColors\\Textures\\CastingBar"
+
 local interruptMap = {
     ["DEATHKNIGHT"] = {47528},
     ["WARRIOR"] = {6552},
@@ -22,6 +25,12 @@ local interruptMap = {
 }
 
 ENC.defaults = {
+    enabledZones = {
+        dungeons = true,
+        raids = true,
+        delvesScenarios = true,
+        openWorld = false,
+    },
     unitType = {
         boss = { r = 0.8, g = 0.2, b = 1.0 },
         miniBoss = { r = 0.2, g = 0.4, b = 1.0 },
@@ -40,17 +49,36 @@ ENC.defaults = {
     castBar = {
         enabled = true,
         interruptReadyEnabled = true,
-        standard = { r = 1.0, g = 0.7, b = 0.0, a = 0.75 },
-        uninterruptible = { r = 0.5, g = 0.5, b = 0.5, a = 0.75 },
-        channel = { r = 0.0, g = 1.0, b = 0.0, a = 0.75 },
-        important = { r = 1.0, g = 0.0, b = 1.0, a = 0.75 },
+        standard = { r = 1.0, g = 0.7, b = 0.0, a = 1.0 },
+        uninterruptible = { r = 0.275, g = 0.275, b = 0.275, a = 1.0 },
+        channel = { r = 0.0, g = 1.0, b = 0.0, a = 1.0 },
+        important = { r = 1.0, g = 0.0, b = 1.0, a = 1.0 },
         interruptReady = { r = 0.0, g = 1.0, b = 0.0, a = 1.0 },
     },
 }
 
 function ENC:UpdateInstanceStatus()
+    local zones = self.db and self.db.enabledZones or self.defaults.enabledZones
     local inInstance, instanceType = IsInInstance()
-    self.inInstance = inInstance and (instanceType == "party" or instanceType == "raid" or instanceType == "scenario")
+    
+    if inInstance then
+        if instanceType == "party" and zones.dungeons then
+            self.inInstance = true
+        elseif instanceType == "raid" and zones.raids then
+            self.inInstance = true
+        elseif instanceType == "scenario" and zones.delvesScenarios then
+            self.inInstance = true
+        else
+            self.inInstance = false
+        end
+    else
+        self.inInstance = zones.openWorld or false
+    end
+    
+    -- Delves fallback check
+    if not self.inInstance and zones.delvesScenarios and C_DelvesUI and C_DelvesUI.HasActiveDelve then
+        self.inInstance = C_DelvesUI.HasActiveDelve()
+    end
 end
 
 function ENC:UpdateInterruptSpell()
@@ -95,6 +123,18 @@ function ENC:InitDB()
         EnemyNameplateColorsDB = {}
     end
     self.db = EnemyNameplateColorsDB
+    
+    if not self.db.enabledZones then self.db.enabledZones = self:DeepCopy(self.defaults.enabledZones) end
+    -- Migrate old separate delves/scenarios keys
+    if self.db.enabledZones.delves ~= nil or self.db.enabledZones.scenarios ~= nil then
+        self.db.enabledZones.delvesScenarios = (self.db.enabledZones.delves ~= false) or (self.db.enabledZones.scenarios ~= false)
+        self.db.enabledZones.delves = nil
+        self.db.enabledZones.scenarios = nil
+    end
+    -- Ensure new zone keys exist for upgrades
+    for k, v in pairs(self.defaults.enabledZones) do
+        if self.db.enabledZones[k] == nil then self.db.enabledZones[k] = v end
+    end
     
     if not self.db.unitType then self.db.unitType = self:DeepCopy(self.defaults.unitType) end
     if not self.db.tank then self.db.tank = self:DeepCopy(self.defaults.tank) end
@@ -151,8 +191,9 @@ function ENC:GetUnitType(unit)
 end
 
 function ENC:GetThreatStatus(unit)
-    local isTanking, status = UnitDetailedThreatSituation("player", unit)
-    return isTanking, status
+    -- Returns: 0 = not on threat table, 1 = has threat but not tanking, 2 = insecurely tanking, 3 = securely tanking
+    local status = UnitThreatSituation("player", unit)
+    return status
 end
 
 function ENC:IsPlayerTank()
@@ -167,8 +208,8 @@ function ENC:IsBeingTankedByOther(unit)
     for i = 1, GetNumGroupMembers() do
         local groupUnit = (IsInRaid() and "raid" or "party") .. i
         if UnitExists(groupUnit) and groupUnit ~= "player" then
-            local isTanking = UnitDetailedThreatSituation(groupUnit, unit)
-            if isTanking and UnitGroupRolesAssigned(groupUnit) == "TANK" then
+            local otherStatus = UnitThreatSituation(groupUnit, unit)
+            if otherStatus and otherStatus >= 2 and UnitGroupRolesAssigned(groupUnit) == "TANK" then
                 return true
             end
         end
@@ -188,25 +229,28 @@ function ENC:GetNameplateColor(unit)
     end
     
     local isPlayerTank = self:IsPlayerTank()
-    local isTanking, status = self:GetThreatStatus(unit)
+    local status = self:GetThreatStatus(unit)
     
+    -- status can be nil if the unit isn't on our threat table
     if isPlayerTank then
         if self:IsBeingTankedByOther(unit) then
             return self.db.tank.onOtherTank
-        elseif status == 3 or isTanking then
+        elseif status and status >= 3 then
             return self.db.unitType[unitType]
-        elseif status == 2 then
+        elseif status and status == 2 then
             return self.db.tank.losingThreat
-        elseif status == 1 or (UnitAffectingCombat(unit) and (status == 0 or not status)) then
+        elseif status and status <= 1 then
+            return self.db.tank.noThreat
+        elseif UnitAffectingCombat(unit) then
             return self.db.tank.noThreat
         elseif unitType ~= "standard" then
             return self.db.unitType[unitType]
         end
         return nil
     else
-        if isTanking or status == 3 then
+        if status and status >= 3 then
             return self.db.dpsHealer.hasThreat
-        elseif status == 2 or status == 1 then
+        elseif status and status >= 1 then
             return self.db.dpsHealer.gainingThreat
         elseif UnitAffectingCombat(unit) or unitType ~= "standard" then
             return self.db.unitType[unitType]
@@ -215,13 +259,34 @@ function ENC:GetNameplateColor(unit)
     end
 end
 
+function ENC:ReplaceCastBarTexture(castBar)
+    if not castBar or castBar:IsForbidden() then return end
+    local texture = castBar:GetStatusBarTexture()
+    if not texture then return end
+    texture:SetTexture(CUSTOM_CASTBAR_TEXTURE)
+    texture:SetTexCoord(0, 1, 0, 1)
+    castBar.ENC_textureReplaced = true
+end
+
+function ENC:RestoreCastBarTexture(castBar)
+    if not castBar or castBar:IsForbidden() or not castBar.ENC_textureReplaced then return end
+    local texture = castBar:GetStatusBarTexture()
+    if texture then
+        texture:SetVertexColor(1, 1, 1, 1)
+    end
+    castBar.ENC_textureReplaced = false
+end
+
 function ENC:ApplyCastBarColor(castBar, r, g, b, a)
     if not castBar or castBar:IsForbidden() then return end
+    self:ReplaceCastBarTexture(castBar)
     local texture = castBar:GetStatusBarTexture()
     if texture then
         texture:SetVertexColor(r, g, b, a or 1.0)
     end
 end
+
+local INTERRUPT_FLASH_TEXTURE = "Interface\\AddOns\\EnemyNameplateColors\\Textures\\ui-castingbar-flash-small"
 
 function ENC:GetOrCreateInterruptBorder(castBar)
     if castBar.ENC_interruptBorder then
@@ -229,39 +294,15 @@ function ENC:GetOrCreateInterruptBorder(castBar)
     end
     
     local borderFrame = CreateFrame("Frame", nil, castBar)
-    borderFrame:SetFrameLevel(castBar:GetFrameLevel() + 1)
+    borderFrame:SetFrameLevel(castBar:GetFrameLevel() + 2)
+    borderFrame:SetPoint("TOPLEFT", castBar, "TOPLEFT", -1, 1)
+    borderFrame:SetPoint("BOTTOMRIGHT", castBar, "BOTTOMRIGHT", 1, -1)
     
-    local size = 2
-    local color = self.db.castBar.interruptReady
-    
-    borderFrame:SetPoint("TOPLEFT", castBar, "TOPLEFT", -size, size)
-    borderFrame:SetPoint("BOTTOMRIGHT", castBar, "BOTTOMRIGHT", size, -size)
-    
-    local function CreateBorderTexture()
-        local tex = borderFrame:CreateTexture(nil, "OVERLAY")
-        tex:SetColorTexture(color.r, color.g, color.b, color.a or 1)
-        return tex
-    end
-    
-    borderFrame.top = CreateBorderTexture()
-    borderFrame.top:SetHeight(size)
-    borderFrame.top:SetPoint("TOPLEFT")
-    borderFrame.top:SetPoint("TOPRIGHT")
-    
-    borderFrame.bottom = CreateBorderTexture()
-    borderFrame.bottom:SetHeight(size)
-    borderFrame.bottom:SetPoint("BOTTOMLEFT")
-    borderFrame.bottom:SetPoint("BOTTOMRIGHT")
-    
-    borderFrame.left = CreateBorderTexture()
-    borderFrame.left:SetWidth(size)
-    borderFrame.left:SetPoint("TOPLEFT")
-    borderFrame.left:SetPoint("BOTTOMLEFT")
-    
-    borderFrame.right = CreateBorderTexture()
-    borderFrame.right:SetWidth(size)
-    borderFrame.right:SetPoint("TOPRIGHT")
-    borderFrame.right:SetPoint("BOTTOMRIGHT")
+    local tex = borderFrame:CreateTexture(nil, "OVERLAY")
+    tex:SetTexture(INTERRUPT_FLASH_TEXTURE)
+    tex:SetAllPoints(borderFrame)
+    tex:SetBlendMode("BLEND")
+    borderFrame.texture = tex
     
     borderFrame:Hide()
     castBar.ENC_interruptBorder = borderFrame
@@ -270,10 +311,8 @@ end
 
 function ENC:UpdateInterruptBorderColor(borderFrame)
     local color = self.db.castBar.interruptReady
-    for _, edge in ipairs({"top", "bottom", "left", "right"}) do
-        if borderFrame[edge] then
-            borderFrame[edge]:SetColorTexture(color.r, color.g, color.b, color.a or 1)
-        end
+    if borderFrame.texture then
+        borderFrame.texture:SetVertexColor(color.r, color.g, color.b, color.a or 1)
     end
 end
 
@@ -292,6 +331,12 @@ function ENC:UpdateInterruptBorder(castBar, notInterruptible)
         return
     end
     
+    -- If notInterruptible is nil, hide border until we know for sure
+    if notInterruptible == nil then
+        borderFrame:Hide()
+        return
+    end
+    
     local anyReady = self:GetAnyInterruptReady()
     if anyReady == nil then
         borderFrame:Hide()
@@ -304,18 +349,9 @@ function ENC:UpdateInterruptBorder(castBar, notInterruptible)
     -- Start with interrupt ready status (anyReady is already 1 or 0 as secret number)
     local alpha = anyReady
     
-    -- Multiply by interruptibility: if notInterruptible is true, alpha becomes 0
-    if notInterruptible ~= nil then
-        local canInterrupt = C_CurveUtil.EvaluateColorValueFromBoolean(notInterruptible, 0, 1)
-        -- Multiply alpha by canInterrupt (both are secret numbers, but we can use EvaluateColorValueFromBoolean)
-        -- If canInterrupt is 0 (can't interrupt), we want alpha to be 0
-        -- If canInterrupt is 1 (can interrupt), we want alpha to stay as anyReady
-        -- We need to express: alpha = anyReady * canInterrupt
-        -- Use: if canInterrupt would be 0, result is 0; if canInterrupt would be 1, result is anyReady
-        -- Since canInterrupt comes from notInterruptible, we can combine differently:
-        -- alpha = EvaluateColorValueFromBoolean(notInterruptible, 0, anyReady)
-        alpha = C_CurveUtil.EvaluateColorValueFromBoolean(notInterruptible, 0, alpha)
-    end
+    -- If notInterruptible is true (can't interrupt), alpha becomes 0
+    -- If notInterruptible is false (can interrupt), alpha stays as anyReady
+    alpha = C_CurveUtil.EvaluateColorValueFromBoolean(notInterruptible, 0, alpha)
     
     borderFrame:SetAlpha(alpha)
 end
@@ -324,6 +360,7 @@ function ENC:GetCastBarColorValues(castBar)
     if not self.inInstance then return nil end
     if not castBar or not castBar.unit or castBar:IsForbidden() then return nil end
     if not self.db.castBar.enabled then return nil end
+    if not strmatch(castBar.unit, "^nameplate") then return nil end
     if not UnitIsEnemy("player", castBar.unit) then return nil end
     
     local name, _, _, _, _, _, _, notInterruptible, spellID = UnitCastingInfo(castBar.unit)
@@ -372,6 +409,7 @@ function ENC:UpdateCastBarColor(castBar)
         castBar.ENC_notInterruptible = notInterruptible
         self:UpdateInterruptBorder(castBar, notInterruptible)
     else
+        self:RestoreCastBarTexture(castBar)
         castBar.ENC_hasColor = false
         castBar.ENC_notInterruptible = nil
         if castBar.ENC_interruptBorder then
@@ -428,6 +466,7 @@ function ENC:HookCastBars()
         
         if event == "UNIT_SPELLCAST_STOP" or event == "UNIT_SPELLCAST_CHANNEL_STOP" or
            event == "UNIT_SPELLCAST_FAILED" or event == "UNIT_SPELLCAST_INTERRUPTED" then
+            ENC:RestoreCastBarTexture(castBar)
             castBar.ENC_hasColor = false
             castBar.ENC_notInterruptible = nil
             if castBar.ENC_interruptBorder then castBar.ENC_interruptBorder:Hide() end
@@ -437,7 +476,7 @@ function ENC:HookCastBars()
         if event == "UNIT_SPELLCAST_START" or event == "UNIT_SPELLCAST_CHANNEL_START" or
            event == "UNIT_SPELLCAST_INTERRUPTIBLE" or event == "UNIT_SPELLCAST_NOT_INTERRUPTIBLE" or
            event == "UNIT_SPELLCAST_DELAYED" or event == "UNIT_SPELLCAST_CHANNEL_UPDATE" then
-            C_Timer.After(0, function() SafeUpdateCastBar(castBar) end)
+            SafeUpdateCastBar(castBar)
         end
     end)
     
@@ -445,7 +484,11 @@ function ENC:HookCastBars()
         if not castBar or not castBar.unit or castBar:IsForbidden() then return end
         if not UnitIsEnemy("player", castBar.unit) then return end
         if castBar.ENC_hasColor and castBar.ENC_r then
-            ENC:ApplyCastBarColor(castBar, castBar.ENC_r, castBar.ENC_g, castBar.ENC_b, castBar.ENC_a)
+            ENC:ReplaceCastBarTexture(castBar)
+            local texture = castBar:GetStatusBarTexture()
+            if texture then
+                texture:SetVertexColor(castBar.ENC_r, castBar.ENC_g, castBar.ENC_b, castBar.ENC_a)
+            end
         end
     end)
     
@@ -454,7 +497,7 @@ function ENC:HookCastBars()
             hooksecurefunc(CastingBarMixin, methodName, function(castBar)
                 if not castBar or not castBar.unit or castBar:IsForbidden() then return end
                 if not UnitIsEnemy("player", castBar.unit) then return end
-                C_Timer.After(0, function() SafeUpdateCastBar(castBar) end)
+                SafeUpdateCastBar(castBar)
             end)
         end
     end
@@ -514,7 +557,42 @@ end)
 
 SLASH_ENC1 = "/enc"
 SLASH_ENC2 = "/enemynameplatecolors"
-SlashCmdList["ENC"] = function()
+SlashCmdList["ENC"] = function(msg)
+    msg = strtrim(msg or ""):lower()
+    
+    if msg == "debug" then
+        local unit = "target"
+        if not UnitExists(unit) then
+            print("|cff00ccff[ENC Debug]|r No target selected.")
+            return
+        end
+        
+        local name = UnitName(unit)
+        local classification = UnitClassification(unit) or "unknown"
+        local level = UnitLevel(unit)
+        local playerLevel = UnitLevel("player")
+        local powerType, powerToken = UnitPowerType(unit)
+        local encType = ENC:GetUnitType(unit)
+        local isFriend = UnitIsFriend("player", unit)
+        local isEnemy = UnitIsEnemy("player", unit)
+        local inCombat = UnitAffectingCombat(unit)
+        
+        print("|cff00ccff[ENC Debug]|r --------------------")
+        print("|cff00ccff[ENC Debug]|r |cffffffffName:|r " .. (name or "nil"))
+        print("|cff00ccff[ENC Debug]|r |cffffffffClassification:|r " .. classification)
+        print("|cff00ccff[ENC Debug]|r |cffffffffLevel:|r " .. level .. " (Player: " .. playerLevel .. ", Diff: " .. (level - playerLevel) .. ")")
+        print("|cff00ccff[ENC Debug]|r |cffffffffPower Type:|r " .. powerType .. " (" .. (powerToken or "unknown") .. ")" .. (powerType == 0 and " |cff00ff00= Mana (Caster)|r" or ""))
+        print("|cff00ccff[ENC Debug]|r |cffffffffENC Type:|r " .. encType)
+        print("|cff00ccff[ENC Debug]|r |cffffffffFriendly:|r " .. tostring(isFriend) .. " |cffffffffEnemy:|r " .. tostring(isEnemy))
+        print("|cff00ccff[ENC Debug]|r |cffffffffIn Combat:|r " .. tostring(inCombat))
+        print("|cff00ccff[ENC Debug]|r |cffffffffAddon Active:|r " .. tostring(ENC.inInstance))
+        
+        local inInstance, instanceType = IsInInstance()
+        print("|cff00ccff[ENC Debug]|r |cffffffffInstance:|r " .. tostring(inInstance) .. " |cffffffffType:|r " .. (instanceType or "none"))
+        print("|cff00ccff[ENC Debug]|r --------------------")
+        return
+    end
+    
     if ENC.OpenOptions then
         ENC:OpenOptions()
     end

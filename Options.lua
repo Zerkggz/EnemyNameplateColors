@@ -73,6 +73,45 @@ local function CreateOptionsPanel()
         return checkbox, offsetY - 40
     end
     
+    -- Enabled Zones
+    yOffset = CreateHeader("Enabled Zones", yOffset)
+    
+    local zonesDesc = scrollChild:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    zonesDesc:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", 0, yOffset)
+    zonesDesc:SetText("Choose where the addon applies custom colors.")
+    yOffset = yOffset - 30
+    
+    local zoneCheckboxes = {}
+    local zoneOrder = {
+        { key = "dungeons",        label = "Dungeons" },
+        { key = "raids",           label = "Raids" },
+        { key = "delvesScenarios", label = "Delves / Scenarios" },
+        { key = "openWorld",       label = "Open World" },
+    }
+    
+    for _, zone in ipairs(zoneOrder) do
+        local cb = CreateFrame("CheckButton", nil, scrollChild, "UICheckButtonTemplate")
+        cb:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", 20, yOffset)
+        cb:SetSize(24, 24)
+        cb:SetChecked(ENC.db.enabledZones[zone.key])
+        
+        local text = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        text:SetPoint("LEFT", cb, "RIGHT", 5, 0)
+        text:SetText(zone.label)
+        
+        cb:SetScript("OnClick", function(self)
+            ENC.db.enabledZones[zone.key] = self:GetChecked()
+            ENC:UpdateInstanceStatus()
+            ENC:UpdateAllNameplates()
+        end)
+        
+        zoneCheckboxes[zone.key] = cb
+        yOffset = yOffset - 28
+    end
+    yOffset = yOffset - 10
+    
+    yOffset = CreateDivider(yOffset)
+    
     -- Unit Type Colors
     yOffset = CreateHeader("Unit Type Colors", yOffset)
     
@@ -186,6 +225,10 @@ local function CreateOptionsPanel()
         
         enableCastBarCheckbox:SetChecked(ENC.db.castBar.enabled)
         enableInterruptReadyCheckbox:SetChecked(ENC.db.castBar.interruptReadyEnabled)
+        
+        for key, cb in pairs(zoneCheckboxes) do
+            cb:SetChecked(ENC.db.enabledZones[key])
+        end
     end
     
     ENC.OptionsPanel = panel

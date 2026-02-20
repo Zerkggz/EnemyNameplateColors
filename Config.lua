@@ -113,11 +113,13 @@ end
 
 -- Reset to defaults
 function ENC:ResetToDefaults()
+    self.db.enabledZones = self:DeepCopy(self.defaults.enabledZones)
     self.db.unitType = self:DeepCopy(self.defaults.unitType)
     self.db.tank = self:DeepCopy(self.defaults.tank)
     self.db.dpsHealer = self:DeepCopy(self.defaults.dpsHealer)
     self.db.castBar = self:DeepCopy(self.defaults.castBar)
 
+    self:UpdateInstanceStatus()
     self:UpdateAllNameplates()
     
     -- Refresh options panel if it exists
