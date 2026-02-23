@@ -191,6 +191,7 @@ function ENC:GetUnitType(unit)
 end
 
 function ENC:GetThreatStatus(unit)
+    -- Use UnitThreatSituation instead of UnitDetailedThreatSituation to avoid secret numbers
     -- Returns: 0 = not on threat table, 1 = has threat but not tanking, 2 = insecurely tanking, 3 = securely tanking
     local status = UnitThreatSituation("player", unit)
     return status
@@ -331,7 +332,7 @@ function ENC:UpdateInterruptBorder(castBar, notInterruptible)
         return
     end
     
-    -- If notInterruptible is nil, hide border until we know for sure
+    -- If notInterruptible is nil, we don't know yet - hide border until we know for sure
     if notInterruptible == nil then
         borderFrame:Hide()
         return
@@ -356,10 +357,9 @@ function ENC:UpdateInterruptBorder(castBar, notInterruptible)
     borderFrame:SetAlpha(alpha)
 end
 
-function ENC:GetCastBarColorValues(castBar)
+function ENC:GetCastBarInfo(castBar)
     if not self.inInstance then return nil end
     if not castBar or not castBar.unit or castBar:IsForbidden() then return nil end
-    if not self.db.castBar.enabled then return nil end
     if not strmatch(castBar.unit, "^nameplate") then return nil end
     if not UnitIsEnemy("player", castBar.unit) then return nil end
     
@@ -371,6 +371,13 @@ function ENC:GetCastBarColorValues(castBar)
         isChanneling = true
     end
     
+    if not name then return nil end
+    
+    return name, notInterruptible, spellID, isChanneling
+end
+
+function ENC:GetCastBarColorValues(castBar)
+    local name, notInterruptible, spellID, isChanneling = self:GetCastBarInfo(castBar)
     if not name then return nil end
     
     local baseColor = isChanneling and self.db.castBar.channel or self.db.castBar.standard
@@ -401,20 +408,27 @@ end
 function ENC:UpdateCastBarColor(castBar)
     if not castBar or castBar:IsForbidden() then return end
     
-    local r, g, b, a, notInterruptible = self:GetCastBarColorValues(castBar)
-    if r then
-        self:ApplyCastBarColor(castBar, r, g, b, a)
-        castBar.ENC_hasColor = true
-        castBar.ENC_r, castBar.ENC_g, castBar.ENC_b, castBar.ENC_a = r, g, b, a
-        castBar.ENC_notInterruptible = notInterruptible
+    local name, notInterruptible = self:GetCastBarInfo(castBar)
+
+    if name then
         self:UpdateInterruptBorder(castBar, notInterruptible)
+    else
+        if castBar.ENC_interruptBorder then castBar.ENC_interruptBorder:Hide() end
+    end
+    
+    -- Cast bar coloring requires the enabled toggle
+    if self.db.castBar.enabled and name then
+        local r, g, b, a = self:GetCastBarColorValues(castBar)
+        if r then
+            self:ApplyCastBarColor(castBar, r, g, b, a)
+            castBar.ENC_hasColor = true
+            castBar.ENC_r, castBar.ENC_g, castBar.ENC_b, castBar.ENC_a = r, g, b, a
+            castBar.ENC_notInterruptible = notInterruptible
+        end
     else
         self:RestoreCastBarTexture(castBar)
         castBar.ENC_hasColor = false
         castBar.ENC_notInterruptible = nil
-        if castBar.ENC_interruptBorder then
-            castBar.ENC_interruptBorder:Hide()
-        end
     end
 end
 

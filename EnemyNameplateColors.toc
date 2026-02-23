@@ -1,8 +1,9 @@
 ## Interface: 120000
 ## Title: Enemy Nameplate Colors
 ## Notes: Colors enemy nameplates based on unit type and threat level
+## IconTexture: Interface\AddOns\EnemyNameplateColors\Icons\Icon.tga
 ## Author: Zerkggz
-## Version: 1.1.0
+## Version: 1.1.1
 ## SavedVariables: EnemyNameplateColorsDB
 ## OptionalDeps: Blizzard_NamePlates
 
