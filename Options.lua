@@ -112,6 +112,67 @@ local function CreateOptionsPanel()
     
     yOffset = CreateDivider(yOffset)
     
+    -- Focus Target
+    yOffset = CreateHeader("Focus Target", yOffset)
+    
+    -- Create both checkboxes manually for mutual exclusivity
+    local focusTargetCheckbox = CreateFrame("CheckButton", nil, scrollChild, "UICheckButtonTemplate")
+    focusTargetCheckbox:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", 20, yOffset)
+    focusTargetCheckbox:SetSize(24, 24)
+    focusTargetCheckbox:SetChecked(ENC.db.focusTarget.enabled)
+    
+    local focusColorLabel = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    focusColorLabel:SetPoint("LEFT", focusTargetCheckbox, "RIGHT", 5, 0)
+    focusColorLabel:SetText("Color focus target nameplate")
+    
+    -- Place texture checkbox on the same row, to the right
+    local focusTextureCheckbox = CreateFrame("CheckButton", nil, scrollChild, "UICheckButtonTemplate")
+    focusTextureCheckbox:SetPoint("LEFT", focusColorLabel, "RIGHT", 20, 0)
+    focusTextureCheckbox:SetSize(24, 24)
+    focusTextureCheckbox:SetChecked(ENC.db.focusTarget.useTexture)
+    
+    local focusTextureLabel = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    focusTextureLabel:SetPoint("LEFT", focusTextureCheckbox, "RIGHT", 5, 0)
+    focusTextureLabel:SetText("Use focus target texture")
+    
+    local focusTargetColor
+    
+    -- Mutual exclusivity: only one can be checked at a time
+    focusTargetCheckbox:SetScript("OnClick", function(self)
+        if self:GetChecked() then
+            ENC.db.focusTarget.enabled = true
+            ENC.db.focusTarget.useTexture = false
+            ENC.db.focusTarget.color.a = 1.0
+            focusTextureCheckbox:SetChecked(false)
+        else
+            ENC.db.focusTarget.enabled = false
+        end
+        local c = ENC.db.focusTarget.color
+        focusTargetColor.texture:SetColorTexture(c.r, c.g, c.b, c.a)
+        ENC:UpdateAllNameplates()
+    end)
+    
+    focusTextureCheckbox:SetScript("OnClick", function(self)
+        if self:GetChecked() then
+            ENC.db.focusTarget.useTexture = true
+            ENC.db.focusTarget.enabled = false
+            ENC.db.focusTarget.color.a = 0.75
+            focusTargetCheckbox:SetChecked(false)
+        else
+            ENC.db.focusTarget.useTexture = false
+        end
+        local c = ENC.db.focusTarget.color
+        focusTargetColor.texture:SetColorTexture(c.r, c.g, c.b, c.a)
+        ENC:UpdateAllNameplates()
+    end)
+    
+    yOffset = yOffset - 40
+    
+    focusTargetColor, yOffset = CreateColorRow(ENC.db.focusTarget.color, "Focus Target Color", yOffset)
+    yOffset = yOffset - 10
+    
+    yOffset = CreateDivider(yOffset)
+    
     -- Unit Type Colors
     yOffset = CreateHeader("Unit Type Colors", yOffset)
     
@@ -165,7 +226,7 @@ local function CreateOptionsPanel()
     
     local castBarDesc = scrollChild:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
     castBarDesc:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", 0, yOffset)
-    castBarDesc:SetText("Colors for enemy cast bars. Priority: Important > Uninterruptible > Channel > Standard")
+    castBarDesc:SetText("Colors for enemy cast bars. Priority: Uninterruptible > Important > Channel > Standard")
     yOffset = yOffset - 35
     
     local enableInterruptReadyCheckbox
@@ -178,9 +239,9 @@ local function CreateOptionsPanel()
     local enableCastBarCheckbox
     enableCastBarCheckbox, yOffset = CreateCheckbox("enabled", "Enable Cast Bar Coloring", yOffset, ENC.db.castBar)
     
-    local importantColor, uninterruptibleColor, channelColor, standardCastColor
-    importantColor, yOffset = CreateColorRow(ENC.db.castBar.important, "Important Spell", yOffset)
+    local uninterruptibleColor, importantColor, channelColor, standardCastColor
     uninterruptibleColor, yOffset = CreateColorRow(ENC.db.castBar.uninterruptible, "Uninterruptible", yOffset)
+    importantColor, yOffset = CreateColorRow(ENC.db.castBar.important, "Important Spell", yOffset)
     channelColor, yOffset = CreateColorRow(ENC.db.castBar.channel, "Channeled Spell", yOffset)
     standardCastColor, yOffset = CreateColorRow(ENC.db.castBar.standard, "Standard Cast", yOffset)
     
@@ -200,6 +261,7 @@ local function CreateOptionsPanel()
     
     function panel:RefreshColors()
         local swatches = {
+            {focusTargetColor, ENC.db.focusTarget.color},
             {bossColor, ENC.db.unitType.boss},
             {miniBossColor, ENC.db.unitType.miniBoss},
             {casterColor, ENC.db.unitType.caster},
@@ -225,6 +287,8 @@ local function CreateOptionsPanel()
         
         enableCastBarCheckbox:SetChecked(ENC.db.castBar.enabled)
         enableInterruptReadyCheckbox:SetChecked(ENC.db.castBar.interruptReadyEnabled)
+        focusTargetCheckbox:SetChecked(ENC.db.focusTarget.enabled)
+        focusTextureCheckbox:SetChecked(ENC.db.focusTarget.useTexture)
         
         for key, cb in pairs(zoneCheckboxes) do
             cb:SetChecked(ENC.db.enabledZones[key])

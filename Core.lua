@@ -4,9 +4,13 @@ _G[ADDON_NAME] = ENC
 
 ENC.inInstance = false
 ENC.interruptSpells = {}
+ENC.playerInCombat = false
 
 -- Custom cast bar fill texture
 local CUSTOM_CASTBAR_TEXTURE = "Interface\\AddOns\\EnemyNameplateColors\\Textures\\CastingBar"
+
+-- Focus target overlay texture
+local FOCUS_TARGET_TEXTURE = "Interface\\AddOns\\EnemyNameplateColors\\Textures\\FocusTarget"
 
 local interruptMap = {
     ["DEATHKNIGHT"] = {47528},
@@ -30,6 +34,11 @@ ENC.defaults = {
         raids = true,
         delvesScenarios = true,
         openWorld = false,
+    },
+    focusTarget = {
+        enabled = false,
+        useTexture = false,
+        color = { r = 1.0, g = 0.3, b = 0.9, a = 1.0 },
     },
     unitType = {
         boss = { r = 0.8, g = 0.2, b = 1.0 },
@@ -136,6 +145,13 @@ function ENC:InitDB()
         if self.db.enabledZones[k] == nil then self.db.enabledZones[k] = v end
     end
     
+    if not self.db.focusTarget then self.db.focusTarget = self:DeepCopy(self.defaults.focusTarget) end
+    if self.db.focusTarget.enabled == nil then self.db.focusTarget.enabled = false end
+    if self.db.focusTarget.useTexture == nil then self.db.focusTarget.useTexture = false end
+    if self.db.focusTarget.color and self.db.focusTarget.color.a == nil then
+        self.db.focusTarget.color.a = 1.0
+    end
+    
     if not self.db.unitType then self.db.unitType = self:DeepCopy(self.defaults.unitType) end
     if not self.db.tank then self.db.tank = self:DeepCopy(self.defaults.tank) end
     if not self.db.dpsHealer then self.db.dpsHealer = self:DeepCopy(self.defaults.dpsHealer) end
@@ -221,6 +237,17 @@ end
 function ENC:GetNameplateColor(unit)
     if not self.inInstance or UnitIsFriend("player", unit) then
         return nil
+    end
+    
+    -- Don't override Blizzard's grey color on tapped units
+    if UnitIsTapDenied(unit) then
+        return nil
+    end
+    
+    -- Focus target override (highest priority) - only when using color mode, not texture mode
+    if self.db.focusTarget.enabled and not self.db.focusTarget.useTexture
+       and UnitExists("focus") and UnitIsUnit(unit, "focus") then
+        return self.db.focusTarget.color
     end
     
     local unitType = self:GetUnitType(unit)
@@ -332,12 +359,6 @@ function ENC:UpdateInterruptBorder(castBar, notInterruptible)
         return
     end
     
-    -- If notInterruptible is nil, we don't know yet - hide border until we know for sure
-    if notInterruptible == nil then
-        borderFrame:Hide()
-        return
-    end
-    
     local anyReady = self:GetAnyInterruptReady()
     if anyReady == nil then
         borderFrame:Hide()
@@ -361,7 +382,9 @@ function ENC:GetCastBarInfo(castBar)
     if not self.inInstance then return nil end
     if not castBar or not castBar.unit or castBar:IsForbidden() then return nil end
     if not strmatch(castBar.unit, "^nameplate") then return nil end
-    if not UnitIsEnemy("player", castBar.unit) then return nil end
+    if UnitIsFriend("player", castBar.unit) then return nil end
+    -- Only color cast bars when the player is in combat to avoid secret value issues
+    if not self.playerInCombat then return nil end
     
     local name, _, _, _, _, _, _, notInterruptible, spellID = UnitCastingInfo(castBar.unit)
     local isChanneling = false
@@ -383,15 +406,6 @@ function ENC:GetCastBarColorValues(castBar)
     local baseColor = isChanneling and self.db.castBar.channel or self.db.castBar.standard
     local r, g, b, a = baseColor.r, baseColor.g, baseColor.b, baseColor.a or 1
     
-    -- Apply uninterruptible color layer
-    if notInterruptible ~= nil and C_CurveUtil and C_CurveUtil.EvaluateColorValueFromBoolean then
-        local unint = self.db.castBar.uninterruptible
-        r = C_CurveUtil.EvaluateColorValueFromBoolean(notInterruptible, unint.r, r)
-        g = C_CurveUtil.EvaluateColorValueFromBoolean(notInterruptible, unint.g, g)
-        b = C_CurveUtil.EvaluateColorValueFromBoolean(notInterruptible, unint.b, b)
-        a = C_CurveUtil.EvaluateColorValueFromBoolean(notInterruptible, unint.a or 1, a)
-    end
-    
     -- Apply important spell color layer
     if spellID and C_Spell and C_Spell.IsSpellImportant and C_CurveUtil and C_CurveUtil.EvaluateColorValueFromBoolean then
         local isImportant = C_Spell.IsSpellImportant(spellID)
@@ -402,6 +416,15 @@ function ENC:GetCastBarColorValues(castBar)
         a = C_CurveUtil.EvaluateColorValueFromBoolean(isImportant, imp.a or 1, a)
     end
     
+    -- Apply uninterruptible color layer (highest priority — overrides important)
+    if C_CurveUtil and C_CurveUtil.EvaluateColorValueFromBoolean then
+        local unint = self.db.castBar.uninterruptible
+        r = C_CurveUtil.EvaluateColorValueFromBoolean(notInterruptible, unint.r, r)
+        g = C_CurveUtil.EvaluateColorValueFromBoolean(notInterruptible, unint.g, g)
+        b = C_CurveUtil.EvaluateColorValueFromBoolean(notInterruptible, unint.b, b)
+        a = C_CurveUtil.EvaluateColorValueFromBoolean(notInterruptible, unint.a or 1, a)
+    end
+    
     return r, g, b, a, notInterruptible
 end
 
@@ -409,7 +432,8 @@ function ENC:UpdateCastBarColor(castBar)
     if not castBar or castBar:IsForbidden() then return end
     
     local name, notInterruptible = self:GetCastBarInfo(castBar)
-
+    
+    -- Interrupt border works independently of cast bar coloring
     if name then
         self:UpdateInterruptBorder(castBar, notInterruptible)
     else
@@ -443,10 +467,63 @@ function ENC:RefreshAllInterruptBorders()
     end
 end
 
+function ENC:ClearAllCastBarColors()
+    for _, nameplate in pairs(C_NamePlate.GetNamePlates()) do
+        if nameplate.UnitFrame and nameplate.UnitFrame.castBar then
+            local castBar = nameplate.UnitFrame.castBar
+            if castBar.ENC_hasColor then
+                self:RestoreCastBarTexture(castBar)
+                castBar.ENC_hasColor = false
+                castBar.ENC_notInterruptible = nil
+                if castBar.ENC_interruptBorder then castBar.ENC_interruptBorder:Hide() end
+            end
+        end
+    end
+end
+
+function ENC:GetOrCreateFocusOverlay(healthBar)
+    if healthBar.ENC_focusOverlay then
+        return healthBar.ENC_focusOverlay
+    end
+    
+    local overlay = healthBar:CreateTexture(nil, "OVERLAY")
+    overlay:SetTexture(FOCUS_TARGET_TEXTURE)
+    overlay:SetAllPoints(healthBar)
+    overlay:SetBlendMode("ADD")
+    overlay:Hide()
+    healthBar.ENC_focusOverlay = overlay
+    return overlay
+end
+
+function ENC:UpdateFocusOverlay(nameplate, unit)
+    if not nameplate.UnitFrame or not nameplate.UnitFrame.healthBar then return end
+    local healthBar = nameplate.UnitFrame.healthBar
+    
+    local showOverlay = self.inInstance
+        and self.db.focusTarget.useTexture
+        and UnitExists("focus")
+        and UnitIsUnit(unit, "focus")
+        and not UnitIsFriend("player", unit)
+    
+    if showOverlay then
+        local overlay = self:GetOrCreateFocusOverlay(healthBar)
+        local c = self.db.focusTarget.color
+        overlay:SetVertexColor(c.r, c.g, c.b, c.a or 0.75)
+        overlay:Show()
+    else
+        if healthBar.ENC_focusOverlay then
+            healthBar.ENC_focusOverlay:Hide()
+        end
+    end
+end
+
 function ENC:UpdateNameplateColor(nameplate)
     if not nameplate or not nameplate.UnitFrame then return end
     local unit = nameplate.UnitFrame.unit
     if not unit then return end
+    
+    -- Update focus target texture overlay
+    self:UpdateFocusOverlay(nameplate, unit)
     
     local color = self:GetNameplateColor(unit)
     if color and nameplate.UnitFrame.healthBar then
@@ -456,11 +533,10 @@ end
 
 function ENC:HookNameplates()
     hooksecurefunc("CompactUnitFrame_UpdateHealthColor", function(frame)
-        if frame.unit and not frame:IsForbidden() and UnitIsEnemy("player", frame.unit) then
-            local color = ENC:GetNameplateColor(frame.unit)
-            if color and frame.healthBar then
-                frame.healthBar:SetStatusBarColor(color.r, color.g, color.b)
-            end
+        if not frame.unit or frame:IsForbidden() then return end
+        local color = ENC:GetNameplateColor(frame.unit)
+        if color and frame.healthBar then
+            frame.healthBar:SetStatusBarColor(color.r, color.g, color.b)
         end
     end)
 end
@@ -470,13 +546,13 @@ function ENC:HookCastBars()
     
     local function SafeUpdateCastBar(castBar)
         if not castBar or not castBar.unit or castBar:IsForbidden() then return end
-        if not UnitIsEnemy("player", castBar.unit) then return end
+        if UnitIsFriend("player", castBar.unit) then return end
         ENC:UpdateCastBarColor(castBar)
     end
     
     hooksecurefunc(CastingBarMixin, "OnEvent", function(castBar, event, arg1)
         if not castBar or not castBar.unit or castBar:IsForbidden() then return end
-        if arg1 ~= castBar.unit or not UnitIsEnemy("player", castBar.unit) then return end
+        if arg1 ~= castBar.unit or UnitIsFriend("player", castBar.unit) then return end
         
         if event == "UNIT_SPELLCAST_STOP" or event == "UNIT_SPELLCAST_CHANNEL_STOP" or
            event == "UNIT_SPELLCAST_FAILED" or event == "UNIT_SPELLCAST_INTERRUPTED" then
@@ -496,7 +572,16 @@ function ENC:HookCastBars()
     
     hooksecurefunc(CastingBarMixin, "OnUpdate", function(castBar)
         if not castBar or not castBar.unit or castBar:IsForbidden() then return end
-        if not UnitIsEnemy("player", castBar.unit) then return end
+        if UnitIsFriend("player", castBar.unit) then return end
+        if not ENC.playerInCombat then
+            if castBar.ENC_hasColor then
+                ENC:RestoreCastBarTexture(castBar)
+                castBar.ENC_hasColor = false
+                castBar.ENC_notInterruptible = nil
+                if castBar.ENC_interruptBorder then castBar.ENC_interruptBorder:Hide() end
+            end
+            return
+        end
         if castBar.ENC_hasColor and castBar.ENC_r then
             ENC:ReplaceCastBarTexture(castBar)
             local texture = castBar:GetStatusBarTexture()
@@ -510,7 +595,7 @@ function ENC:HookCastBars()
         if CastingBarMixin[methodName] then
             hooksecurefunc(CastingBarMixin, methodName, function(castBar)
                 if not castBar or not castBar.unit or castBar:IsForbidden() then return end
-                if not UnitIsEnemy("player", castBar.unit) then return end
+                if UnitIsFriend("player", castBar.unit) then return end
                 SafeUpdateCastBar(castBar)
             end)
         end
@@ -544,11 +629,13 @@ eventFrame:RegisterEvent("UNIT_THREAT_SITUATION_UPDATE")
 eventFrame:RegisterEvent("NAME_PLATE_UNIT_ADDED")
 eventFrame:RegisterEvent("SPELLS_CHANGED")
 eventFrame:RegisterEvent("SPELL_UPDATE_COOLDOWN")
+eventFrame:RegisterEvent("PLAYER_FOCUS_CHANGED")
 
 eventFrame:SetScript("OnEvent", function(self, event, arg1)
     if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
         ENC:InitDB()
     elseif event == "PLAYER_LOGIN" then
+        ENC.playerInCombat = InCombatLockdown()
         ENC:HookNameplates()
         ENC:HookCastBars()
         ENC:UpdateInstanceStatus()
@@ -563,8 +650,15 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
     elseif event == "NAME_PLATE_UNIT_ADDED" then
         local nameplate = C_NamePlate.GetNamePlateForUnit(arg1)
         if nameplate then ENC:UpdateNameplateColor(nameplate) end
-    elseif event == "PLAYER_REGEN_ENABLED" or event == "PLAYER_REGEN_DISABLED" or
-           event == "UNIT_THREAT_LIST_UPDATE" or event == "UNIT_THREAT_SITUATION_UPDATE" then
+    elseif event == "PLAYER_REGEN_ENABLED" then
+        ENC.playerInCombat = false
+        ENC:ClearAllCastBarColors()
+        ENC:UpdateAllNameplates()
+    elseif event == "PLAYER_REGEN_DISABLED" then
+        ENC.playerInCombat = true
+        ENC:UpdateAllNameplates()
+    elseif event == "UNIT_THREAT_LIST_UPDATE" or event == "UNIT_THREAT_SITUATION_UPDATE" or
+           event == "PLAYER_FOCUS_CHANGED" then
         ENC:UpdateAllNameplates()
     end
 end)
@@ -603,6 +697,9 @@ SlashCmdList["ENC"] = function(msg)
         
         local inInstance, instanceType = IsInInstance()
         print("|cff00ccff[ENC Debug]|r |cffffffffInstance:|r " .. tostring(inInstance) .. " |cffffffffType:|r " .. (instanceType or "none"))
+        
+        local isFocus = UnitExists("focus") and UnitIsUnit(unit, "focus")
+        print("|cff00ccff[ENC Debug]|r |cffffffffIs Focus:|r " .. tostring(isFocus))
         print("|cff00ccff[ENC Debug]|r --------------------")
         return
     end
