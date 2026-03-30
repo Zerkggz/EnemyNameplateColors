@@ -244,6 +244,23 @@ local function CreateOptionsPanel()
     importantColor, yOffset = CreateColorRow(ENC.db.castBar.important, "Important Spell", yOffset)
     channelColor, yOffset = CreateColorRow(ENC.db.castBar.channel, "Channeled Spell", yOffset)
     standardCastColor, yOffset = CreateColorRow(ENC.db.castBar.standard, "Standard Cast", yOffset)
+    yOffset = yOffset - 10
+    
+    yOffset = CreateDivider(yOffset)
+    
+    -- Dispel Glow
+    yOffset = CreateHeader("Dispel Glow", yOffset)
+    
+    local dispelGlowDesc = scrollChild:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    dispelGlowDesc:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", 0, yOffset)
+    dispelGlowDesc:SetText("Adds a colored glow to purgeable/stealable enemy buffs on nameplates.")
+    yOffset = yOffset - 35
+    
+    local dispelGlowCheckbox
+    dispelGlowCheckbox, yOffset = CreateCheckbox("enabled", "Enable Purgeable Glow", yOffset, ENC.db.dispelGlow)
+    
+    local dispelGlowColor
+    dispelGlowColor, yOffset = CreateColorRow(ENC.db.dispelGlow.color, "Glow Color", yOffset)
     
     scrollChild:SetHeight(math.abs(yOffset) + 50)
     
@@ -276,6 +293,7 @@ local function CreateOptionsPanel()
             {uninterruptibleColor, ENC.db.castBar.uninterruptible},
             {channelColor, ENC.db.castBar.channel},
             {standardCastColor, ENC.db.castBar.standard},
+            {dispelGlowColor, ENC.db.dispelGlow.color},
         }
         
         for _, swatch in ipairs(swatches) do
@@ -289,6 +307,7 @@ local function CreateOptionsPanel()
         enableInterruptReadyCheckbox:SetChecked(ENC.db.castBar.interruptReadyEnabled)
         focusTargetCheckbox:SetChecked(ENC.db.focusTarget.enabled)
         focusTextureCheckbox:SetChecked(ENC.db.focusTarget.useTexture)
+        dispelGlowCheckbox:SetChecked(ENC.db.dispelGlow.enabled)
         
         for key, cb in pairs(zoneCheckboxes) do
             cb:SetChecked(ENC.db.enabledZones[key])
@@ -316,7 +335,13 @@ local function InitOptions()
     if Settings and Settings.RegisterCanvasLayoutCategory then
         local category = Settings.RegisterCanvasLayoutCategory(panel, panel.name)
         Settings.RegisterAddOnCategory(category)
-        ENC.OpenOptions = function() Settings.OpenToCategory(category:GetID()) end
+        ENC.OpenOptions = function()
+            if InCombatLockdown() then
+                print("|cff00ccff[ENC]|r Cannot open options during combat.")
+                return
+            end
+            Settings.OpenToCategory(category:GetID())
+        end
     else
         InterfaceOptions_AddCategory(panel)
         ENC.OpenOptions = function()

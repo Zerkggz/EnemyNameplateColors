@@ -119,6 +119,7 @@ function ENC:ResetToDefaults()
     self.db.tank = self:DeepCopy(self.defaults.tank)
     self.db.dpsHealer = self:DeepCopy(self.defaults.dpsHealer)
     self.db.castBar = self:DeepCopy(self.defaults.castBar)
+    self.db.dispelGlow = self:DeepCopy(self.defaults.dispelGlow)
 
     self:UpdateInstanceStatus()
     self:UpdateAllNameplates()

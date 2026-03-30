@@ -5,6 +5,8 @@ _G[ADDON_NAME] = ENC
 ENC.inInstance = false
 ENC.interruptSpells = {}
 ENC.playerInCombat = false
+ENC.neutralCache = {} -- tracks which nameplate units are neutral (yellow nameplates)
+ENC.otherTanks = {} -- cached list of other tank unit IDs in the group
 
 -- Custom cast bar fill texture
 local CUSTOM_CASTBAR_TEXTURE = "Interface\\AddOns\\EnemyNameplateColors\\Textures\\CastingBar"
@@ -56,7 +58,7 @@ ENC.defaults = {
         gainingThreat = { r = 1.0, g = 0.6, b = 0.0 },
     },
     castBar = {
-        enabled = true,
+        enabled = false,
         interruptReadyEnabled = true,
         standard = { r = 1.0, g = 0.7, b = 0.0, a = 1.0 },
         uninterruptible = { r = 0.275, g = 0.275, b = 0.275, a = 1.0 },
@@ -64,13 +66,17 @@ ENC.defaults = {
         important = { r = 1.0, g = 0.0, b = 1.0, a = 1.0 },
         interruptReady = { r = 0.0, g = 1.0, b = 0.0, a = 1.0 },
     },
+    dispelGlow = {
+        enabled = true,
+        color = { r = 0.0, g = 0.5, b = 1.0 },
+    },
 }
 
 function ENC:UpdateInstanceStatus()
     local zones = self.db and self.db.enabledZones or self.defaults.enabledZones
     local inInstance, instanceType = IsInInstance()
     
-    if inInstance then
+    if inInstance or instanceType == "party" or instanceType == "raid" or instanceType == "scenario" then
         if instanceType == "party" and zones.dungeons then
             self.inInstance = true
         elseif instanceType == "raid" and zones.raids then
@@ -157,7 +163,7 @@ function ENC:InitDB()
     if not self.db.dpsHealer then self.db.dpsHealer = self:DeepCopy(self.defaults.dpsHealer) end
     if not self.db.castBar then self.db.castBar = self:DeepCopy(self.defaults.castBar) end
     
-    if self.db.castBar.enabled == nil then self.db.castBar.enabled = true end
+    if self.db.castBar.enabled == nil then self.db.castBar.enabled = false end
     if self.db.castBar.interruptReadyEnabled == nil then self.db.castBar.interruptReadyEnabled = true end
     if not self.db.castBar.interruptReady then
         self.db.castBar.interruptReady = self:DeepCopy(self.defaults.castBar.interruptReady)
@@ -170,6 +176,10 @@ function ENC:InitDB()
             self.db.castBar[colorName].a = self.defaults.castBar[colorName].a
         end
     end
+    
+    if not self.db.dispelGlow then self.db.dispelGlow = self:DeepCopy(self.defaults.dispelGlow) end
+    if self.db.dispelGlow.enabled == nil then self.db.dispelGlow.enabled = true end
+    if not self.db.dispelGlow.color then self.db.dispelGlow.color = self:DeepCopy(self.defaults.dispelGlow.color) end
 end
 
 function ENC:DeepCopy(orig)
@@ -207,10 +217,20 @@ function ENC:GetUnitType(unit)
 end
 
 function ENC:GetThreatStatus(unit)
-    -- Use UnitThreatSituation instead of UnitDetailedThreatSituation to avoid secret numbers
     -- Returns: 0 = not on threat table, 1 = has threat but not tanking, 2 = insecurely tanking, 3 = securely tanking
     local status = UnitThreatSituation("player", unit)
-    return status
+    if status == nil then return nil end
+    
+    -- UnitThreatSituation can return secret numbers in Midnight.
+    -- pcall to safely extract a usable value; fall back to nil if tainted.
+    local ok, val = pcall(function()
+        if status >= 3 then return 3
+        elseif status >= 2 then return 2
+        elseif status >= 1 then return 1
+        else return 0 end
+    end)
+    
+    return ok and val or nil
 end
 
 function ENC:IsPlayerTank()
@@ -219,14 +239,24 @@ function ENC:IsPlayerTank()
     return GetSpecializationRole(spec) == "TANK"
 end
 
+function ENC:UpdateOtherTanks()
+    wipe(self.otherTanks)
+    for i = 1, GetNumGroupMembers() do
+        local groupUnit = (IsInRaid() and "raid" or "party") .. i
+        if UnitExists(groupUnit) and not UnitIsUnit(groupUnit, "player")
+           and UnitGroupRolesAssigned(groupUnit) == "TANK" then
+            table.insert(self.otherTanks, groupUnit)
+        end
+    end
+end
+
 function ENC:IsBeingTankedByOther(unit)
     if not UnitExists(unit) then return false end
     
-    for i = 1, GetNumGroupMembers() do
-        local groupUnit = (IsInRaid() and "raid" or "party") .. i
-        if UnitExists(groupUnit) and groupUnit ~= "player" then
-            local otherStatus = UnitThreatSituation(groupUnit, unit)
-            if otherStatus and otherStatus >= 2 and UnitGroupRolesAssigned(groupUnit) == "TANK" then
+    for _, tankUnit in ipairs(self.otherTanks) do
+        if UnitExists(tankUnit) then
+            local otherStatus = UnitThreatSituation(tankUnit, unit)
+            if otherStatus and otherStatus >= 2 then
                 return true
             end
         end
@@ -236,6 +266,12 @@ end
 
 function ENC:GetNameplateColor(unit)
     if not self.inInstance or UnitIsFriend("player", unit) then
+        return nil
+    end
+    
+    -- Skip neutral units (yellow nameplates) - let Blizzard's default color show
+    -- neutralCache is set by reading the health bar color Blizzard assigns before we override
+    if self.neutralCache[unit] then
         return nil
     end
     
@@ -332,6 +368,7 @@ function ENC:GetOrCreateInterruptBorder(castBar)
     tex:SetBlendMode("BLEND")
     borderFrame.texture = tex
     
+    borderFrame:SetAlpha(0)
     borderFrame:Hide()
     castBar.ENC_interruptBorder = borderFrame
     return borderFrame
@@ -349,7 +386,7 @@ function ENC:UpdateInterruptBorder(castBar, notInterruptible)
     
     local borderFrame = self:GetOrCreateInterruptBorder(castBar)
     
-    if not self.db.castBar.interruptReadyEnabled or not self.interruptSpells or #self.interruptSpells == 0 then
+    if not self.playerInCombat or not self.db.castBar.interruptReadyEnabled or not self.interruptSpells or #self.interruptSpells == 0 then
         borderFrame:Hide()
         return
     end
@@ -365,17 +402,18 @@ function ENC:UpdateInterruptBorder(castBar, notInterruptible)
         return
     end
     
-    self:UpdateInterruptBorderColor(borderFrame)
-    borderFrame:Show()
-    
-    -- Start with interrupt ready status (anyReady is already 1 or 0 as secret number)
-    local alpha = anyReady
-    
-    -- If notInterruptible is true (can't interrupt), alpha becomes 0
-    -- If notInterruptible is false (can interrupt), alpha stays as anyReady
-    alpha = C_CurveUtil.EvaluateColorValueFromBoolean(notInterruptible, 0, alpha)
+    -- notInterruptible may be a secret boolean in Midnight — cannot branch on it at all.
+    -- Pass directly to EvaluateColorValueFromBoolean; pcall handles nil or other errors.
+    -- If notInterruptible is true (can't interrupt): alpha = 0. If false: alpha = anyReady.
+    local ok, alpha = pcall(C_CurveUtil.EvaluateColorValueFromBoolean, notInterruptible, 0, anyReady)
+    if not ok then
+        borderFrame:Hide()
+        return
+    end
     
     borderFrame:SetAlpha(alpha)
+    self:UpdateInterruptBorderColor(borderFrame)
+    borderFrame:Show()
 end
 
 function ENC:GetCastBarInfo(castBar)
@@ -436,8 +474,11 @@ function ENC:UpdateCastBarColor(castBar)
     -- Interrupt border works independently of cast bar coloring
     if name then
         self:UpdateInterruptBorder(castBar, notInterruptible)
+        -- Always cache notInterruptible for RefreshAllInterruptBorders
+        castBar.ENC_notInterruptible = notInterruptible
     else
         if castBar.ENC_interruptBorder then castBar.ENC_interruptBorder:Hide() end
+        castBar.ENC_notInterruptible = nil
     end
     
     -- Cast bar coloring requires the enabled toggle
@@ -447,12 +488,10 @@ function ENC:UpdateCastBarColor(castBar)
             self:ApplyCastBarColor(castBar, r, g, b, a)
             castBar.ENC_hasColor = true
             castBar.ENC_r, castBar.ENC_g, castBar.ENC_b, castBar.ENC_a = r, g, b, a
-            castBar.ENC_notInterruptible = notInterruptible
         end
     else
         self:RestoreCastBarTexture(castBar)
         castBar.ENC_hasColor = false
-        castBar.ENC_notInterruptible = nil
     end
 end
 
@@ -460,7 +499,7 @@ function ENC:RefreshAllInterruptBorders()
     for _, nameplate in pairs(C_NamePlate.GetNamePlates()) do
         if nameplate.UnitFrame and nameplate.UnitFrame.castBar then
             local castBar = nameplate.UnitFrame.castBar
-            if castBar.ENC_hasColor then
+            if (castBar.casting or castBar.channeling) and castBar.ENC_notInterruptible ~= nil then
                 self:UpdateInterruptBorder(castBar, castBar.ENC_notInterruptible)
             end
         end
@@ -534,6 +573,16 @@ end
 function ENC:HookNameplates()
     hooksecurefunc("CompactUnitFrame_UpdateHealthColor", function(frame)
         if not frame.unit or frame:IsForbidden() then return end
+        if not strmatch(frame.unit, "^nameplate") then return end
+        
+        -- Detect neutral units by reading the color Blizzard just set
+        -- Neutral/yellow nameplates have r > 0.9, g > 0.7, b < 0.2
+        -- Red hostile nameplates have r > 0.9, g < 0.2, b < 0.2
+        if frame.healthBar then
+            local r, g, b = frame.healthBar:GetStatusBarColor()
+            ENC.neutralCache[frame.unit] = (r > 0.9 and g > 0.7 and b < 0.2)
+        end
+        
         local color = ENC:GetNameplateColor(frame.unit)
         if color and frame.healthBar then
             frame.healthBar:SetStatusBarColor(color.r, color.g, color.b)
@@ -578,8 +627,9 @@ function ENC:HookCastBars()
                 ENC:RestoreCastBarTexture(castBar)
                 castBar.ENC_hasColor = false
                 castBar.ENC_notInterruptible = nil
-                if castBar.ENC_interruptBorder then castBar.ENC_interruptBorder:Hide() end
             end
+            -- Always hide interrupt border out of combat, independent of cast bar coloring
+            if castBar.ENC_interruptBorder then castBar.ENC_interruptBorder:Hide() end
             return
         end
         if castBar.ENC_hasColor and castBar.ENC_r then
@@ -606,6 +656,106 @@ function ENC:HookCastBars()
     HookIfExists("UpdateHighlightWhenCastTarget")
 end
 
+-- Dispel Glow System
+local GLOW_TEXTURE = "Interface\\Buttons\\UI-ActionButton-Border"
+
+function ENC:GetOrCreateDispelGlow(buffFrame)
+    if buffFrame.ENC_dispelGlow then
+        return buffFrame.ENC_dispelGlow
+    end
+    
+    local glow = buffFrame:CreateTexture(nil, "OVERLAY")
+    glow:SetTexture(GLOW_TEXTURE)
+    glow:SetPoint("CENTER", buffFrame, "CENTER", 0, 0)
+    -- Use anchor-based sizing instead of GetWidth/GetHeight (which return secret numbers)
+    glow:SetPoint("TOPLEFT", buffFrame, "TOPLEFT", -8, 8)
+    glow:SetPoint("BOTTOMRIGHT", buffFrame, "BOTTOMRIGHT", 8, -8)
+    glow:SetBlendMode("ADD")
+    glow:SetAlpha(0)
+    glow:Hide()
+    buffFrame.ENC_dispelGlow = glow
+    return glow
+end
+
+function ENC:UpdateDispelGlowForNameplate(nameplate)
+    if not self.db.dispelGlow.enabled then return end
+    if not self.inInstance then return end
+    if not nameplate.UnitFrame then return end
+    if not C_CurveUtil or not C_CurveUtil.EvaluateColorValueFromBoolean then return end
+    
+    local unit = nameplate.UnitFrame.unit
+    if not unit then return end
+    
+    local auraFrame = nameplate.UnitFrame.AurasFrame
+    if not auraFrame then return end
+    
+    local c = self.db.dispelGlow.color
+    
+    -- Process buff frames - add glow for stealable buffs
+    local buffList = auraFrame.BuffListFrame
+    if buffList then
+        for _, buffFrame in ipairs({buffList:GetChildren()}) do
+            if buffFrame and buffFrame:IsShown() and buffFrame.auraInstanceID then
+                local auraData = C_UnitAuras.GetAuraDataByAuraInstanceID(unit, buffFrame.auraInstanceID)
+                if auraData then
+                    local isStealable = auraData.isStealable
+                    local a = C_CurveUtil.EvaluateColorValueFromBoolean(isStealable, 0.7, 0)
+                    
+                    local glow = self:GetOrCreateDispelGlow(buffFrame)
+                    glow:SetVertexColor(c.r, c.g, c.b, 1.0)
+                    glow:SetAlpha(a)
+                    glow:Show()
+                else
+                    if buffFrame.ENC_dispelGlow then buffFrame.ENC_dispelGlow:Hide() end
+                end
+            else
+                if buffFrame and buffFrame.ENC_dispelGlow then buffFrame.ENC_dispelGlow:Hide() end
+            end
+        end
+    end
+    
+    -- Hide any stale glows on debuff frames (frames may be recycled from buff pool)
+    local debuffList = auraFrame.DebuffListFrame
+    if debuffList then
+        for _, debuffFrame in ipairs({debuffList:GetChildren()}) do
+            if debuffFrame and debuffFrame.ENC_dispelGlow then
+                debuffFrame.ENC_dispelGlow:Hide()
+            end
+        end
+    end
+end
+
+function ENC:HookDispelGlows()
+    -- Hook into the nameplate buff update system
+    if NameplateBuffContainerMixin and NameplateBuffContainerMixin.UpdateBuffs then
+        hooksecurefunc(NameplateBuffContainerMixin, "UpdateBuffs", function(auraFrame)
+            if not auraFrame or not auraFrame:GetParent() then return end
+            local unitFrame = auraFrame:GetParent()
+            if not unitFrame or not unitFrame.unit then return end
+            if UnitIsFriend("player", unitFrame.unit) then return end
+            
+            local nameplate = C_NamePlate.GetNamePlateForUnit(unitFrame.unit)
+            if nameplate then
+                ENC:UpdateDispelGlowForNameplate(nameplate)
+            end
+        end)
+    end
+    
+    -- Also hook CompactUnitFrame_UpdateAuras as a fallback
+    if CompactUnitFrame_UpdateAuras then
+        hooksecurefunc("CompactUnitFrame_UpdateAuras", function(frame)
+            if not frame or not frame.unit or frame:IsForbidden() then return end
+            if not strmatch(frame.unit, "^nameplate") then return end
+            if UnitIsFriend("player", frame.unit) then return end
+            
+            local nameplate = C_NamePlate.GetNamePlateForUnit(frame.unit)
+            if nameplate then
+                ENC:UpdateDispelGlowForNameplate(nameplate)
+            end
+        end)
+    end
+end
+
 function ENC:UpdateAllNameplates()
     for _, nameplate in pairs(C_NamePlate.GetNamePlates()) do
         self:UpdateNameplateColor(nameplate)
@@ -627,9 +777,12 @@ eventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
 eventFrame:RegisterEvent("UNIT_THREAT_LIST_UPDATE")
 eventFrame:RegisterEvent("UNIT_THREAT_SITUATION_UPDATE")
 eventFrame:RegisterEvent("NAME_PLATE_UNIT_ADDED")
+eventFrame:RegisterEvent("NAME_PLATE_UNIT_REMOVED")
 eventFrame:RegisterEvent("SPELLS_CHANGED")
 eventFrame:RegisterEvent("SPELL_UPDATE_COOLDOWN")
 eventFrame:RegisterEvent("PLAYER_FOCUS_CHANGED")
+eventFrame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
 
 eventFrame:SetScript("OnEvent", function(self, event, arg1)
     if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
@@ -638,18 +791,28 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
         ENC.playerInCombat = InCombatLockdown()
         ENC:HookNameplates()
         ENC:HookCastBars()
+        ENC:HookDispelGlows()
         ENC:UpdateInstanceStatus()
         ENC:UpdateInterruptSpell()
-    elseif event == "PLAYER_ENTERING_WORLD" then
+        ENC:UpdateOtherTanks()
+    elseif event == "PLAYER_ENTERING_WORLD" or event == "ZONE_CHANGED_NEW_AREA" then
         ENC:UpdateInstanceStatus()
+        ENC:UpdateOtherTanks()
+        ENC:UpdateAllNameplates()
+    elseif event == "GROUP_ROSTER_UPDATE" then
+        ENC:UpdateOtherTanks()
         ENC:UpdateAllNameplates()
     elseif event == "SPELLS_CHANGED" then
         ENC:UpdateInterruptSpell()
     elseif event == "SPELL_UPDATE_COOLDOWN" then
-        ENC:RefreshAllInterruptBorders()
+        if ENC.playerInCombat and ENC.interruptSpells and #ENC.interruptSpells > 0 then
+            ENC:RefreshAllInterruptBorders()
+        end
     elseif event == "NAME_PLATE_UNIT_ADDED" then
         local nameplate = C_NamePlate.GetNamePlateForUnit(arg1)
         if nameplate then ENC:UpdateNameplateColor(nameplate) end
+    elseif event == "NAME_PLATE_UNIT_REMOVED" then
+        ENC.neutralCache[arg1] = nil
     elseif event == "PLAYER_REGEN_ENABLED" then
         ENC.playerInCombat = false
         ENC:ClearAllCastBarColors()
@@ -657,8 +820,18 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
     elseif event == "PLAYER_REGEN_DISABLED" then
         ENC.playerInCombat = true
         ENC:UpdateAllNameplates()
-    elseif event == "UNIT_THREAT_LIST_UPDATE" or event == "UNIT_THREAT_SITUATION_UPDATE" or
-           event == "PLAYER_FOCUS_CHANGED" then
+    elseif event == "UNIT_THREAT_LIST_UPDATE" then
+        -- High-frequency per-mob threat ticks: update only the affected plate
+        if arg1 and strmatch(arg1, "^nameplate") then
+            local nameplate = C_NamePlate.GetNamePlateForUnit(arg1)
+            if nameplate then ENC:UpdateNameplateColor(nameplate) end
+        else
+            ENC:UpdateAllNameplates()
+        end
+    elseif event == "UNIT_THREAT_SITUATION_UPDATE" then
+        -- Meaningful threat transitions (aggro gained/lost): full refresh
+        ENC:UpdateAllNameplates()
+    elseif event == "PLAYER_FOCUS_CHANGED" then
         ENC:UpdateAllNameplates()
     end
 end)
