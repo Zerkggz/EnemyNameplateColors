@@ -1,0 +1,14 @@
+## Interface: 120005
+## Title: Enemy Nameplate Colors
+## Notes: Colors enemy nameplates based on unit type and threat level
+## IconTexture: Interface\AddOns\EnemyNameplateColors\Icons\Icon.tga
+## Author: Zerkggz
+## Version: @project-version@
+## X-Curse-Project-ID: 1464013
+## X-Wago-ID: nKW3yYKE
+## SavedVariables: EnemyNameplateColorsDB
+## OptionalDeps: Blizzard_NamePlates
+
+Core.lua
+Config.lua
+Options.lua

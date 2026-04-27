@@ -1,0 +1,8 @@
+package-as: EnemyNameplateColors
+
+ignore:
+  - .github
+  - .gitignore
+  - README.md
+  - LICENSE
+  - CHANGELOG.md
