@@ -729,34 +729,25 @@ function ENC:UpdateDispelGlowForNameplate(nameplate)
 end
 
 function ENC:HookDispelGlows()
-    -- Hook into the nameplate buff update system
-    if NameplateBuffContainerMixin and NameplateBuffContainerMixin.UpdateBuffs then
-        hooksecurefunc(NameplateBuffContainerMixin, "UpdateBuffs", function(auraFrame)
-            if not auraFrame or not auraFrame:GetParent() then return end
-            local unitFrame = auraFrame:GetParent()
-            if not unitFrame or not unitFrame.unit then return end
-            if UnitIsFriend("player", unitFrame.unit) then return end
-            
-            local nameplate = C_NamePlate.GetNamePlateForUnit(unitFrame.unit)
+    -- Register UNIT_AURA event to detect buff changes on nameplate units.
+    -- The old NameplateBuffContainerMixin.UpdateBuffs and CompactUnitFrame_UpdateAuras
+    -- hooks were removed by Blizzard. UNIT_AURA is the stable event-based alternative.
+    -- Deferred by one frame to ensure Blizzard's buff frames are populated first.
+    local auraFrame = CreateFrame("Frame")
+    auraFrame:RegisterEvent("UNIT_AURA")
+    auraFrame:SetScript("OnEvent", function(_, _, unit)
+        if not unit or not strmatch(unit, "^nameplate") then return end
+        if not ENC.db.dispelGlow.enabled then return end
+        if not ENC.inInstance then return end
+        if UnitIsFriend("player", unit) then return end
+        
+        C_Timer.After(0, function()
+            local nameplate = C_NamePlate.GetNamePlateForUnit(unit)
             if nameplate then
                 ENC:UpdateDispelGlowForNameplate(nameplate)
             end
         end)
-    end
-    
-    -- Also hook CompactUnitFrame_UpdateAuras as a fallback
-    if CompactUnitFrame_UpdateAuras then
-        hooksecurefunc("CompactUnitFrame_UpdateAuras", function(frame)
-            if not frame or not frame.unit or frame:IsForbidden() then return end
-            if not strmatch(frame.unit, "^nameplate") then return end
-            if UnitIsFriend("player", frame.unit) then return end
-            
-            local nameplate = C_NamePlate.GetNamePlateForUnit(frame.unit)
-            if nameplate then
-                ENC:UpdateDispelGlowForNameplate(nameplate)
-            end
-        end)
-    end
+    end)
 end
 
 function ENC:UpdateAllNameplates()
@@ -822,6 +813,8 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
                     ENC:UpdateCastBarColor(castBar)
                 end
             end
+            -- Check for stealable buffs on the new nameplate
+            ENC:UpdateDispelGlowForNameplate(nameplate)
         end
     elseif event == "NAME_PLATE_UNIT_REMOVED" then
         ENC.neutralCache[arg1] = nil
