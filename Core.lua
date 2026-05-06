@@ -249,6 +249,11 @@ function ENC:GetNameplateColor(unit)
         return nil
     end
     
+    -- Don't override class colors on enemy players
+    if UnitIsPlayer(unit) then
+        return nil
+    end
+    
     -- Skip neutral units (yellow nameplates) - let Blizzard's default color show
     -- neutralCache is set by reading the health bar color Blizzard assigns before we override
     if self.neutralCache[unit] then
@@ -350,6 +355,16 @@ function ENC:GetOrCreateInterruptBorder(castBar)
     
     borderFrame:SetAlpha(0)
     borderFrame:Hide()
+    
+    -- Safety net: if the frame ever becomes visible while the player is out of combat,
+    -- hide it immediately. Catches edge cases from secret number alpha resolution
+    -- changing when combat taint context shifts.
+    borderFrame:SetScript("OnShow", function(self)
+        if not ENC.playerInCombat then
+            self:Hide()
+        end
+    end)
+    
     castBar.ENC_interruptBorder = borderFrame
     return borderFrame
 end
@@ -591,14 +606,18 @@ function ENC:HookCastBars()
     
     local function SafeUpdateCastBar(castBar)
         if not castBar or not castBar.unit or castBar:IsForbidden() then return end
-        if UnitIsFriend("player", castBar.unit) then return end
+        -- pcall UnitIsFriend: it can return a secret boolean in Midnight
+        local okFriend, isFriend = pcall(UnitIsFriend, "player", castBar.unit)
+        if okFriend and isFriend then return end
         ENC:UpdateCastBarColor(castBar)
     end
     
     hooksecurefunc(CastingBarMixin, "OnEvent", function(castBar, event, arg1)
         if not castBar or not castBar.unit or castBar:IsForbidden() then return end
-        if arg1 ~= castBar.unit or UnitIsFriend("player", castBar.unit) then return end
+        if arg1 ~= castBar.unit then return end
         
+        -- Cast stop cleanup: always runs without tainted API calls.
+        -- If UnitIsFriend errors below, this cleanup still happens.
         if event == "UNIT_SPELLCAST_STOP" or event == "UNIT_SPELLCAST_CHANNEL_STOP" or
            event == "UNIT_SPELLCAST_FAILED" or event == "UNIT_SPELLCAST_INTERRUPTED" then
             ENC:RestoreCastBarTexture(castBar)
@@ -616,16 +635,23 @@ function ENC:HookCastBars()
     
     hooksecurefunc(CastingBarMixin, "OnUpdate", function(castBar)
         if not castBar or not castBar.unit or castBar:IsForbidden() then return end
-        if UnitIsFriend("player", castBar.unit) then return end
+        
+        -- Out of combat: always clean up first, no tainted API calls needed.
+        -- This MUST run before UnitIsFriend to avoid secret boolean aborts
+        -- preventing cleanup.
         if not ENC.playerInCombat then
             if castBar.ENC_hasColor then
                 ENC:RestoreCastBarTexture(castBar)
                 castBar.ENC_hasColor = false
             end
-            -- Always hide interrupt border out of combat, independent of cast bar coloring
             if castBar.ENC_interruptBorder then castBar.ENC_interruptBorder:Hide() end
             return
         end
+        
+        -- In combat: filter friendly units (pcall to handle secret booleans)
+        local okFriend, isFriend = pcall(UnitIsFriend, "player", castBar.unit)
+        if okFriend and isFriend then return end
+        
         if castBar.ENC_hasColor and castBar.ENC_r then
             ENC:ReplaceCastBarTexture(castBar)
             local texture = castBar:GetStatusBarTexture()
@@ -648,7 +674,6 @@ function ENC:HookCastBars()
         if CastingBarMixin[methodName] then
             hooksecurefunc(CastingBarMixin, methodName, function(castBar)
                 if not castBar or not castBar.unit or castBar:IsForbidden() then return end
-                if UnitIsFriend("player", castBar.unit) then return end
                 SafeUpdateCastBar(castBar)
             end)
         end
@@ -723,6 +748,16 @@ function ENC:UpdateDispelGlowForNameplate(nameplate)
         for _, debuffFrame in ipairs({debuffList:GetChildren()}) do
             if debuffFrame and debuffFrame.ENC_dispelGlow then
                 debuffFrame.ENC_dispelGlow:Hide()
+            end
+        end
+    end
+    
+    -- Hide any stale glows on crowd control frames (frames may be recycled from buff pool)
+    local ccList = auraFrame.CrowdControlListFrame
+    if ccList then
+        for _, ccFrame in ipairs({ccList:GetChildren()}) do
+            if ccFrame and ccFrame.ENC_dispelGlow then
+                ccFrame.ENC_dispelGlow:Hide()
             end
         end
     end
