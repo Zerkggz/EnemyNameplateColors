@@ -11,6 +11,9 @@ ENC.otherTanks = {} -- cached list of other tank unit IDs in the group
 -- Custom cast bar fill texture
 local CUSTOM_CASTBAR_TEXTURE = "Interface\\AddOns\\EnemyNameplateColors\\Textures\\CastingBar"
 
+-- Blizzard API for detecting secret values (Midnight)
+local issecretvalue = _G.issecretvalue
+
 -- Focus target overlay texture
 local FOCUS_TARGET_TEXTURE = "Interface\\AddOns\\EnemyNameplateColors\\Textures\\FocusTarget"
 
@@ -381,8 +384,14 @@ function ENC:UpdateInterruptBorder(castBar)
     
     local borderFrame = self:GetOrCreateInterruptBorder(castBar)
     
+    -- Non-secret gates first
     if not self.playerInCombat or not self.db.castBar.interruptReadyEnabled
        or not self.interruptSpells or #self.interruptSpells == 0 then
+        borderFrame:Hide()
+        return
+    end
+    
+    if not castBar.BorderShield or not borderFrame.SetAlphaFromBoolean then
         borderFrame:Hide()
         return
     end
@@ -393,28 +402,20 @@ function ENC:UpdateInterruptBorder(castBar)
         return
     end
     
-    if not castBar.BorderShield then
-        borderFrame:Hide()
-        return
-    end
-    
-    -- Fully branchless alpha computation. No secret value is ever branched on.
-    -- BorderShield:IsShown() returns a secret boolean — feed it directly into
-    -- EvaluateColorValueFromBoolean to get isInterruptible as a secret number.
-    -- Then chain with cooldown readiness. Result goes straight to SetAlpha.
-    local ok, alpha = pcall(function()
-        local isShielded = castBar.BorderShield:IsShown()
-        -- isInterruptible: 0 if shielded (not interruptible), 1 if not shielded (interruptible)
-        local isInterruptible = C_CurveUtil.EvaluateColorValueFromBoolean(isShielded, 0, 1)
-        
+    -- Two-layer alpha computation, no secret value is ever branched on:
+    --
+    -- Layer 1 (cooldown): branchless chain computes anyReady as a secret number (0 or 1).
+    -- Layer 2 (interruptibility): SetAlphaFromBoolean uses BorderShield:IsShown() (secret boolean)
+    --   to pick between alpha 0 (not interruptible) and anyReady (interruptible).
+    --
+    -- Final alpha: 1 only when cast IS interruptible AND interrupt IS ready.
+    local ok, anyReady = pcall(function()
         local result = 0
         for _, spellID in ipairs(self.interruptSpells) do
             local cooldownDuration = C_Spell.GetSpellCooldownDuration(spellID)
             if cooldownDuration and cooldownDuration.IsZero then
                 local isZero = cooldownDuration:IsZero()
-                -- If interrupt is ready AND cast is interruptible: result = 1
-                -- Uses isInterruptible (secret number) as the true-value
-                result = C_CurveUtil.EvaluateColorValueFromBoolean(isZero, isInterruptible, result)
+                result = C_CurveUtil.EvaluateColorValueFromBoolean(isZero, 1, result)
             end
         end
         return result
@@ -425,8 +426,17 @@ function ENC:UpdateInterruptBorder(castBar)
         return
     end
     
-    -- alpha is a secret number — pass directly to SetAlpha, never compare
-    borderFrame:SetAlpha(alpha)
+    -- BorderShield:IsShown() may return a secret boolean.
+    -- SetAlphaFromBoolean handles it natively:
+    --   Shield shown (not interruptible) → alpha = 0
+    --   Shield hidden (interruptible) → alpha = anyReady (secret number: 0 or 1)
+    local okShield, isShielded = pcall(castBar.BorderShield.IsShown, castBar.BorderShield)
+    if not okShield then
+        borderFrame:Hide()
+        return
+    end
+    
+    borderFrame:SetAlphaFromBoolean(isShielded, 0, anyReady)
     self:UpdateInterruptBorderColor(borderFrame)
     borderFrame:Show()
 end
@@ -888,6 +898,11 @@ SlashCmdList["ENC"] = function(msg)
             return
         end
         
+        local P = function(label, value)
+            print("|cff00ccff[ENC Debug]|r |cffffffff" .. label .. ":|r " .. tostring(value))
+        end
+        local S = function() print("|cff00ccff[ENC Debug]|r --------------------") end
+        
         local name = UnitName(unit)
         local classification = UnitClassification(unit) or "unknown"
         local level = UnitLevel(unit)
@@ -896,24 +911,105 @@ SlashCmdList["ENC"] = function(msg)
         local encType = ENC:GetUnitType(unit)
         local isFriend = UnitIsFriend("player", unit)
         local isEnemy = UnitIsEnemy("player", unit)
+        local isPlayer = UnitIsPlayer(unit)
         local inCombat = UnitAffectingCombat(unit)
         
-        print("|cff00ccff[ENC Debug]|r --------------------")
-        print("|cff00ccff[ENC Debug]|r |cffffffffName:|r " .. (name or "nil"))
-        print("|cff00ccff[ENC Debug]|r |cffffffffClassification:|r " .. classification)
-        print("|cff00ccff[ENC Debug]|r |cffffffffLevel:|r " .. level .. " (Player: " .. playerLevel .. ", Diff: " .. (level - playerLevel) .. ")")
-        print("|cff00ccff[ENC Debug]|r |cffffffffPower Type:|r " .. powerType .. " (" .. (powerToken or "unknown") .. ")" .. (powerType == 0 and " |cff00ff00= Mana (Caster)|r" or ""))
-        print("|cff00ccff[ENC Debug]|r |cffffffffENC Type:|r " .. encType)
-        print("|cff00ccff[ENC Debug]|r |cffffffffFriendly:|r " .. tostring(isFriend) .. " |cffffffffEnemy:|r " .. tostring(isEnemy))
-        print("|cff00ccff[ENC Debug]|r |cffffffffIn Combat:|r " .. tostring(inCombat))
-        print("|cff00ccff[ENC Debug]|r |cffffffffAddon Active:|r " .. tostring(ENC.inInstance))
+        S()
+        P("Name", name or "nil")
+        P("Classification", classification)
+        P("Level", level .. " (Player: " .. playerLevel .. ", Diff: " .. (level - playerLevel) .. ")")
+        P("Power Type", powerType .. " (" .. (powerToken or "unknown") .. ")" .. (powerType == 0 and " |cff00ff00= Mana (Caster)|r" or ""))
+        P("ENC Type", encType)
+        P("Is Player", isPlayer)
+        P("Friendly", tostring(isFriend) .. " |cffffffffEnemy:|r " .. tostring(isEnemy))
+        P("In Combat (target)", inCombat)
+        P("In Combat (player)", ENC.playerInCombat)
+        P("Addon Active", ENC.inInstance)
         
         local inInstance, instanceType = IsInInstance()
-        print("|cff00ccff[ENC Debug]|r |cffffffffInstance:|r " .. tostring(inInstance) .. " |cffffffffType:|r " .. (instanceType or "none"))
+        P("Instance", tostring(inInstance) .. " |cffffffffType:|r " .. (instanceType or "none"))
         
         local isFocus = UnitExists("focus") and UnitIsUnit(unit, "focus")
-        print("|cff00ccff[ENC Debug]|r |cffffffffIs Focus:|r " .. tostring(isFocus))
-        print("|cff00ccff[ENC Debug]|r --------------------")
+        P("Is Focus", isFocus)
+        
+        -- Interrupt spells
+        local spellCount = ENC.interruptSpells and #ENC.interruptSpells or 0
+        local spellNames = {}
+        for _, spellID in ipairs(ENC.interruptSpells or {}) do
+            local spellName = C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(spellID) or tostring(spellID)
+            table.insert(spellNames, spellName .. " (" .. spellID .. ")")
+        end
+        P("Interrupt Spells", spellCount .. (spellCount > 0 and " [" .. table.concat(spellNames, ", ") .. "]" or " (none)"))
+        
+        -- Cast bar state
+        local nameplate = C_NamePlate.GetNamePlateForUnit(unit)
+        if nameplate and nameplate.UnitFrame and nameplate.UnitFrame.castBar then
+            local castBar = nameplate.UnitFrame.castBar
+            S()
+            print("|cff00ccff[ENC Debug]|r |cffffff00-- Cast Bar --|r")
+            P("Casting", castBar.casting)
+            P("Channeling", castBar.channeling)
+            
+            if castBar.casting or castBar.channeling then
+                local castName, _, _, _, _, _, _, notInterruptible, spellID = UnitCastingInfo(unit)
+                if not castName then
+                    castName, _, _, _, _, _, notInterruptible, spellID = UnitChannelInfo(unit)
+                end
+                P("Spell", (castName or "nil") .. " (ID: " .. tostring(spellID) .. ")")
+                P("notInterruptible (API)", notInterruptible)
+                
+                if castBar.BorderShield then
+                    local okShield, isShielded = pcall(castBar.BorderShield.IsShown, castBar.BorderShield)
+                    P("BorderShield:IsShown()", okShield and tostring(isShielded) or "ERROR: " .. tostring(isShielded))
+                    if okShield and issecretvalue then
+                        P("BorderShield IsShown secret", issecretvalue(isShielded))
+                    end
+                else
+                    P("BorderShield", "nil")
+                end
+            end
+            
+            P("ENC_hasColor", castBar.ENC_hasColor)
+            P("ENC_textureReplaced", castBar.ENC_textureReplaced)
+            
+            -- Interrupt border state
+            if castBar.ENC_interruptBorder then
+                local border = castBar.ENC_interruptBorder
+                local okShown, borderShown = pcall(border.IsShown, border)
+                local okAlpha, borderAlpha = pcall(border.GetAlpha, border)
+                P("Border Exists", true)
+                P("Border Shown", okShown and tostring(borderShown) or "ERROR")
+                P("Border Alpha", okAlpha and tostring(borderAlpha) or "ERROR")
+            else
+                P("Border Exists", false)
+            end
+        else
+            S()
+            P("Cast Bar", "not found on nameplate")
+        end
+        
+        -- Dispel glow state
+        if nameplate and nameplate.UnitFrame and nameplate.UnitFrame.AurasFrame then
+            local auraFrame = nameplate.UnitFrame.AurasFrame
+            local buffList = auraFrame.BuffListFrame
+            if buffList then
+                local glowCount = 0
+                local buffCount = 0
+                for i = 1, buffList:GetNumChildren() do
+                    local child = select(i, buffList:GetChildren())
+                    if child and child:IsShown() then
+                        buffCount = buffCount + 1
+                        if child.ENC_dispelGlow and child.ENC_dispelGlow:IsShown() then
+                            glowCount = glowCount + 1
+                        end
+                    end
+                end
+                P("Visible Buffs", buffCount)
+                P("Active Glows", glowCount)
+            end
+        end
+        
+        S()
         return
     end
     
