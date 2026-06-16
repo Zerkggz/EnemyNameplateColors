@@ -1,4 +1,4 @@
-## Interface: 120005
+## Interface: 120007
 ## Title: Enemy Nameplate Colors
 ## Notes: Colors enemy nameplates based on unit type and threat level
 ## IconTexture: Interface\AddOns\EnemyNameplateColors\Icons\Icon.tga
